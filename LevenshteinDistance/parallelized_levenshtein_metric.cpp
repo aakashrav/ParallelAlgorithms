@@ -7,11 +7,16 @@
 #include <vector>
 #include <time.h>
 #include <stdio.h>
+#include <atomic>
+#include <mutex>
+#include <math.h>
 
 using namespace std;
 
 // #define SERIAL
 #define PARALLEL
+
+#ifdef SERIAL
 
 int
 return_distance(const std::string& s1, const std::string& s2)
@@ -29,7 +34,6 @@ return_distance(const std::string& s1, const std::string& s2)
     return d[len1][len2];
 }
 
-#ifdef SERIAL
 int 
 main(int argc, char * argv[])
 {
@@ -43,117 +47,219 @@ main(int argc, char * argv[])
 
 #ifdef PARALLEL
 
-void 
-levenshtein_promise_handler(const std::string & str, const std::string & str2, std::promise<int> p)
+std::vector<vector<long>> DISTANCE_MATRIX;
+
+int GRANULARITY;
+
+void
+usage()
 {
-	int distance;
-	distance = return_distance(str, str2);
-	p.set_value(distance);
+	std::cout << "Usage levenshtein_distance <word_one> <word_two> <num_threads_in_diagonal>" << std::endl;
 }
 
-/* Set the granularity of the parallel program - how many threads do we have for processing the data*/
-const int GRANULARITY = 2;
+void 
+perform_matrix_computations(const std::string str, const std::string str2, std::vector<long *> data_structure, std::pair<int, int> starting_point, std::promise<int> && p)
+{
+	std::pair<int, int> current_point = starting_point;
+
+	for (int i=0; i < data_structure.size(); i++)
+	{
+
+		long min_val;
+		if ( (current_point.first == 0) && (current_point.second > 0) )
+			min_val = current_point.second;
+		else if ((current_point.first > 0) && (current_point.second == 0) )
+			min_val = current_point.first;
+		else
+		{
+			min_val = std::min({ DISTANCE_MATRIX[current_point.first - 1][current_point.second] +1, DISTANCE_MATRIX[current_point.first][current_point.second - 1] + 1, DISTANCE_MATRIX[current_point.first - 1][current_point.second - 1] + (str[current_point.first- 1] == str2[current_point.second - 1] ? 0 : 1) });
+		}
+
+		*(data_structure[i]) = min_val;
+		current_point.first = current_point.first-1;
+		current_point.second = current_point.second +1;
+	}
+	
+	// Notify the futures that we are finished
+	p.set_value(1);
+}
+
 
 int
 main(int argc, char * argv[])
 {
+	if (argc <  4)
+	{
+		usage();
+		return 1;
+	}
+
 	const std::string word_one = argv[1];
 	const std::string word_two = argv[2];
-	const int maximum_length = std::max(word_one.size(), word_two.size());
+	GRANULARITY = atoi(argv[3]);
 
-	/* Find the length of the substrings of the words that correspond to our particular granularity setting*/
-	int TASK_SUBSTRING_LENGTH = maximum_length/GRANULARITY;
-
-	std::vector<std::string> word_one_substrings;
-	std::vector<std::string> word_two_substrings;
-
-	/* Generate substrings of the two words to fit the particular granularity constraints */
-	for (int i=0; i < GRANULARITY; i++)
+	for (int i=0; i < word_one.size()+1; i++)
 	{
-		std::string word_substring;
-
-		/* Handle cases where we go above the word's maximum indice */
-		if (i * TASK_SUBSTRING_LENGTH > word_one.size()-1)
-			word_substring = "";
-		else if ((i+1) * (TASK_SUBSTRING_LENGTH) <= word_one.size() - 1)
-            word_substring = word_one.substr(i * TASK_SUBSTRING_LENGTH,(i+1) * TASK_SUBSTRING_LENGTH);
-        else
-        	word_substring = word_one.substr(i * TASK_SUBSTRING_LENGTH,word_one.size()-1);
-
-        word_one_substrings.push_back(word_substring);
+		DISTANCE_MATRIX.push_back(std::vector<long>());
+		for (int j=0; j < word_two.size()+1; j++)
+		{
+			DISTANCE_MATRIX[i].push_back(0);
+		}
 	}
 
-	for (int i=0; i < GRANULARITY; i++)
-	{
-		std::string word_substring;
 
-		/* Handle cases where we go above the word's maximum indice */
-		if (i * TASK_SUBSTRING_LENGTH > word_two.size()-1)
-			word_substring = "";
-		else if ((i+1) * (TASK_SUBSTRING_LENGTH) <= word_two.size() - 1)
-            word_substring = word_two.substr(i * TASK_SUBSTRING_LENGTH,(i+1) * TASK_SUBSTRING_LENGTH);
-        else
-        	word_substring = word_two.substr(i * TASK_SUBSTRING_LENGTH,word_two.size()-1);
-
-        word_two_substrings.push_back(word_substring);
-	}
-
-	/* Store the final result in this variable */
+	/* Placeholder variable */
 	int result = 0;
-
-
-	/* Keep a vector of futures */
-	std::vector<std::future<int>> levenshtein_futures;
-
-	/* Generate GRANULARITY number of futures and start the threads */
-	for (int i=0; i < GRANULARITY; i++)
-	{
-		/*
-		You should get future from the promise before the move, otherwise it 
-		would not be accessible from the main thread after the move.
-		*/
-		std::promise<int> p;
-		levenshtein_futures.push_back(p.get_future());
-
-		/* Create the thread for particular substrings of the words*/
-		std::cout << "ABOUT TO CREATE THREAD" << std::endl;
-		std::thread th(levenshtein_promise_handler, word_one_substrings[i], word_two_substrings[i], std::move(p));
-		std::cout << "CREATED THREAD" << std::endl;
-	}
 
 
 	std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
 
-	// Here we only wait for one future for a specified amount of time, and move on to the next one
-	// Better than waiting for a single future endlessly and only when it finishes moving on
-	size_t running = GRANULARITY;
-	int cur = 0;
-	// While we have only more than one future left
-	while (running > 1)
-	{
-		std::future<int> &f = levenshtein_futures[cur];
+	DISTANCE_MATRIX[0][0] = 0;
+	atomic_thread_fence(std::memory_order_release);
 
-		// Wait for a bit on the current future to see if its ready
-		// If its still not ready then move to the next one.
-		auto status = f.wait_for(std::chrono::milliseconds(10));
-		if (status == std::future_status::ready)
-		{	
-			result += f.get();
-			levenshtein_futures.erase(levenshtein_futures.begin() + cur);
-			running--;
-		}
-		else
+	/* Create the first half */
+	for (int i=1; i <= word_one.size(); i++)
+	{
+		/* Keep a vector of futures */
+		std::vector<std::future<int>> levenshtein_futures;
+
+		int current_row = i;
+		int current_column = 0;
+		std::vector<long *> diagonal_row;
+		while ( (current_row >= 0) && (current_column <= word_two.size()) )
 		{
-			// Loop back to first future and check again.
-			if (cur < running-1)
-				cur++;
-			else
-				cur =0;
+			diagonal_row.push_back(&(DISTANCE_MATRIX[current_row][current_column]));
+			current_row--;
+			current_column++;
 		}
+
+		int GRANULARITY_SIZE = diagonal_row.size()/GRANULARITY;
+		for (int current_thread=0; current_thread < GRANULARITY; current_thread++)
+		{
+			std::pair<int, int> matrix_position = std::make_pair<int,int>(i-(GRANULARITY_SIZE * current_thread),0 + (GRANULARITY_SIZE * current_thread));
+
+			std::vector<long *> thread_diagonal_row;
+			if (current_thread == GRANULARITY-1)
+				thread_diagonal_row = std::vector<long *>(diagonal_row.begin() + (GRANULARITY_SIZE * current_thread), diagonal_row.end());
+			else
+				thread_diagonal_row = std::vector<long *>(diagonal_row.begin() + (GRANULARITY_SIZE * current_thread), diagonal_row.begin() + (GRANULARITY_SIZE * (current_thread+1)));
+
+			std::promise<int> p;
+			levenshtein_futures.push_back(p.get_future());
+
+			// Start the thread
+			std::thread th(perform_matrix_computations,word_one,word_two,thread_diagonal_row,matrix_position,std::move(p));
+			th.detach();
+		}
+
+		// Here we only wait for one future for a specified amount of time, and move on to the next one
+		// Better than waiting for a single future endlessly and only when it finishes moving on
+		size_t running = levenshtein_futures.size();
+		int cur = 0;
+		// While we have only more than one future left
+		while (running > 0)
+		{
+			std::future<int> &f = levenshtein_futures[cur];
+
+			// Wait for a bit on the current future to see if its ready
+			// If its still not ready then move to the next one.
+			auto status = f.wait_for(std::chrono::milliseconds(10));
+			if (status == std::future_status::ready)
+			{	
+				result += f.get();
+				levenshtein_futures.erase(levenshtein_futures.begin() + cur);
+				running--;
+			}
+			else
+			{
+				// Loop back to first future and check again.
+				if (cur < running-1)
+					cur++;
+				else
+					cur =0;
+			}
+		}
+
+		atomic_thread_fence(std::memory_order_acquire);
+
 	}
 
-	std::chrono::steady_clock::time_point end= std::chrono::steady_clock::now();
+	// Second part of the diagonalization process
+	for (int i=1; i <= word_two.size()-1; i++)
+	{
+		/* Keep a vector of futures */
+		std::vector<std::future<int>> levenshtein_futures;
 
-	std::cout << result << " Time: " << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count() << std::endl;
+		int current_row = word_one.size();
+		int current_column = i;
+		std::vector<long *> diagonal_row;
+		while ( (current_column <= word_two.size()) && (current_row >= 0) )
+		{
+			diagonal_row.push_back(&(DISTANCE_MATRIX[current_row][current_column]));
+			current_row--;
+			current_column++;
+		}
+
+		int GRANULARITY_SIZE = diagonal_row.size()/GRANULARITY;
+		for (int current_thread=0; current_thread < GRANULARITY; current_thread++)
+		{
+			std::pair<int, int> matrix_position = std::make_pair<int,int>(word_one.size()-(GRANULARITY_SIZE * current_thread),i + (GRANULARITY_SIZE * current_thread));
+			
+			std::vector<long *> thread_diagonal_row;
+			if (current_thread == GRANULARITY-1)
+				thread_diagonal_row = std::vector<long *>(diagonal_row.begin() + (GRANULARITY_SIZE * current_thread), diagonal_row.end());
+			else
+				thread_diagonal_row = std::vector<long *>(diagonal_row.begin() + (GRANULARITY_SIZE * current_thread), diagonal_row.begin() + (GRANULARITY_SIZE * (current_thread+1)));
+
+			std::promise<int> p;
+			levenshtein_futures.push_back(p.get_future());
+
+			// Start the thread
+			std::thread th(perform_matrix_computations,word_one,word_two,thread_diagonal_row,matrix_position,std::move(p));
+			th.detach();
+		}
+
+		// Here we only wait for one future for a specified amount of time, and move on to the next one
+		// Better than waiting for a single future endlessly and only when it finishes moving on
+		size_t running = levenshtein_futures.size();
+		int cur = 0;
+		// While we have only more than one future left
+		while (running > 0)
+		{
+			std::future<int> &f = levenshtein_futures[cur];
+
+			// Wait for a bit on the current future to see if its ready
+			// If its still not ready then move to the next one.
+			auto status = f.wait_for(std::chrono::milliseconds(10));
+			if (status == std::future_status::ready)
+			{	
+				result += f.get();
+				levenshtein_futures.erase(levenshtein_futures.begin() + cur);
+				running--;
+			}
+			else
+			{
+				// Loop back to first future and check again.
+				if (cur < running-1)
+					cur++;
+				else
+					cur =0;
+			}
+		}
+
+		atomic_thread_fence(std::memory_order_acquire);
+	}
+
+	atomic_thread_fence(std::memory_order_acquire);
+
+	// Fill in the final value.
+	DISTANCE_MATRIX[word_one.size()][word_two.size()] = 
+	std::min({ DISTANCE_MATRIX[word_one.size() - 1][word_two.size()] + 1, DISTANCE_MATRIX[word_one.size()][word_two.size() - 1] + 1, DISTANCE_MATRIX[word_one.size() - 1][word_two.size() - 1] + (word_one[word_one.size() - 2] == word_two[word_two.size() - 2] ? 0 : 1) });
+
+	atomic_thread_fence(std::memory_order_acquire);
+
+	std::chrono::steady_clock::time_point end= std::chrono::steady_clock::now();
+	std::cout << DISTANCE_MATRIX[word_one.size()][word_two.size()] << " Time: " << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count() << std::endl;
 }
+
 #endif

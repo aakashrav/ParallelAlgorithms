@@ -1,18 +1,10 @@
-# SOURCES=parallelized_levenshtein_metric.cpp
-# OBJECTS=$(SOURCES:.cpp=.out)
-# CC=g++
-# CFLAGS=-std=c++11 -pthread
+SOURCES=parallelized_levenshtein_metric.cpp
+CC=g++
+CFLAGS=-std=c++11 -pthread
 
-# all: levenshtein_distance
+all: levenshtein_distance
 
-# .cpp.out:
-# 	$(CC) $(CFLAGS) $<
-
-# levenshtein_distance: $(OBJECTS)
-# 	$(CC) -o $@ a.out
-
-all: parallelized_levenshtein_metric.cpp
-	g++ -std=c++11 -pthread -o main parallelized_levenshtein_metric.cpp
-
+levenshtein_distance: $(SOURCES)
+	$(CC) $(CFLAGS) -o $@ $(SOURCES)
 clean:
-	rm a.out main
+	rm levenshtein_distance
